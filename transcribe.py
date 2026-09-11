@@ -31,24 +31,27 @@ model = WhisperModel("small", device="cpu", compute_type="int8")
 
 os.makedirs("transcripts", exist_ok=True)
 
-for filename in os.listdir("videos"):
-    if not filename.lower().endswith((".mp4", ".mov")):
-        continue
+VIDEO_DIR = "/home/rf-gul/Desktop/content/ready-to-upload/questions"
 
-    video_path = os.path.join("videos", filename)
-    out_path = os.path.join("transcripts", os.path.splitext(filename)[0] + ".txt")
+for root, dirs, files in os.walk(VIDEO_DIR):
+    for filename in files:
+        if not filename.lower().endswith((".mp4", ".mov")):
+            continue
 
-    if os.path.exists(out_path):
-        print(f"Skipping (already done): {filename}")
-        continue
+        video_path = os.path.join(root, filename)
+        out_path = os.path.join("transcripts", os.path.splitext(filename)[0] + ".txt")
 
-    print(f"Transcribing: {filename}")
-    segments, info = model.transcribe(video_path, language=None, vad_filter=True)
+        if os.path.exists(out_path):
+            print(f"Skipping (already done): {filename}")
+            continue
 
-    with open(out_path, "w", encoding="utf-8") as f:
-        for segment in segments:
-            f.write(segment.text.strip() + "\n")
+        print(f"Transcribing: {filename}")
+        segments, info = model.transcribe(video_path, language=None, vad_filter=True)
 
-    print(f"  -> {info.language} ({info.language_probability:.2f})")
+        with open(out_path, "w", encoding="utf-8") as f:
+            for segment in segments:
+                f.write(segment.text.strip() + "\n")
+
+        print(f"  -> {info.language} ({info.language_probability:.2f})")
 
 print("All done.")
