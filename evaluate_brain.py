@@ -11,15 +11,23 @@ from google import genai
 # CONFIG
 # ============================================================
 
-with open("system_prompt.md", "r", encoding="utf-8") as f:
-    SYSTEM_PROMPT = f.read()
-
 MODEL = "gemini-3.1-flash-lite"
+EMBEDDING_MODEL = "gemini-embedding-2"
 
 KNOWLEDGE_FILE = Path("knowledge_base/records.jsonl")
 EMBEDDINGS_FILE = Path("knowledge_base/gemini_embeddings.npz")
+EVAL_FILE = Path("knowledge_base/eval_retrieval.jsonl")
+OUTPUT_FILE = Path("knowledge_base/eval_generation_results.jsonl")
 
 TOP_K = 5
+
+
+# ============================================================
+# SYSTEM PROMPT
+# ============================================================
+
+with open("system_prompt.md", "r", encoding="utf-8") as f:
+    SYSTEM_PROMPT = f.read()
 
 
 # ============================================================
@@ -30,22 +38,22 @@ load_dotenv()
 
 
 def load_api_keys():
-    """Load all configured Gemini API keys."""
 
     keys = []
 
     for i in range(1, 6):
+
         key = os.getenv(f"GEMINI_API_KEY_{i}")
 
         if key:
-            keys.append(
-                {
-                    "number": i,
-                    "key": key,
-                }
-            )
+
+            keys.append({
+                "number": i,
+                "key": key,
+            })
 
     if not keys:
+
         raise RuntimeError(
             "No Gemini API keys found in .env"
         )
@@ -73,9 +81,9 @@ def load_knowledge_base():
             if not line:
                 continue
 
-            record = json.loads(line)
-
-            records.append(record)
+            records.append(
+                json.loads(line)
+            )
 
     return records
 
@@ -101,6 +109,33 @@ def load_embeddings():
 
 
 # ============================================================
+# LOAD EVALUATION QUESTIONS
+# ============================================================
+
+def load_eval_questions():
+
+    questions = []
+
+    with EVAL_FILE.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+
+        for line in file:
+
+            line = line.strip()
+
+            if not line:
+                continue
+
+            questions.append(
+                json.loads(line)
+            )
+
+    return questions
+
+
+# ============================================================
 # GEMINI CLIENT
 # ============================================================
 
@@ -115,10 +150,13 @@ def create_client(api_key):
 # EMBEDDING
 # ============================================================
 
-def embed_question(client, question):
+def embed_question(
+    client,
+    question,
+):
 
     result = client.models.embed_content(
-        model="gemini-embedding-2",
+        model=EMBEDDING_MODEL,
         contents=question,
     )
 
@@ -132,7 +170,10 @@ def embed_question(client, question):
 # COSINE SIMILARITY
 # ============================================================
 
-def cosine_similarity(query, embeddings):
+def cosine_similarity(
+    query,
+    embeddings,
+):
 
     query_norm = np.linalg.norm(query)
 
@@ -141,13 +182,11 @@ def cosine_similarity(query, embeddings):
         axis=1,
     )
 
-    similarities = (
+    return (
         embeddings @ query
     ) / (
         embedding_norms * query_norm
     )
-
-    return similarities
 
 
 # ============================================================
@@ -176,12 +215,12 @@ def retrieve(
         similarities
     )[::-1][:TOP_K]
 
-    results = []
-
     id_to_record = {
         record["id"]: record
         for record in records
     }
+
+    results = []
 
     for index in top_indices:
 
@@ -194,15 +233,13 @@ def retrieve(
         if record is None:
             continue
 
-        results.append(
-            {
-                "id": record_id,
-                "score": float(
-                    similarities[index]
-                ),
-                "record": record,
-            }
-        )
+        results.append({
+            "id": record_id,
+            "score": float(
+                similarities[index]
+            ),
+            "record": record,
+        })
 
     return results
 
@@ -270,13 +307,14 @@ USER QUESTION:
 RELEVANT KNOWLEDGE:
 {context}
 
-INSTRUCTIONS:
-Answer the user's question based on the retrieved knowledge base on these instructions:
+Answer the user's question based on the retrieved knowledge base.
+
+Instructions:
 1. Find the retrieved record(s) that directly answer the question.
 2. Use their exact meaning and direction.
 3. Do not generalize from a related topic.
 4. Do not reverse, soften, or reinterpret the user's viewpoint.
-5. Never use general knowledge to fill a missing part of the user's answer. If the retrieved records only partially answer the question, answer only the supported part.
+5. If the retrieved knowledge does not contain enough evidence, do not invent an answer.
 6. For unknown topics, use the user's deferral style.
 7. Keep the final answer short and natural.
 """
@@ -286,7 +324,7 @@ Answer the user's question based on the retrieved knowledge base on these instru
         contents=prompt,
         config={
             "system_instruction": SYSTEM_PROMPT,
-        }
+        },
     )
 
     return response.text.strip()
@@ -298,16 +336,20 @@ Answer the user's question based on the retrieved knowledge base on these instru
 
 def main():
 
-    print("=" * 60)
-    print("SECOND BRAIN")
-    print("=" * 60)
+    print("=" * 70)
+    print("SECOND BRAIN — GENERATION EVALUATION")
+    print("=" * 70)
+
+    # --------------------------------------------------------
+    # Load data
+    # --------------------------------------------------------
 
     print("\nLoading knowledge base...")
 
     records = load_knowledge_base()
 
     print(
-        f"Loaded {len(records)} knowledge records."
+        f"Loaded {len(records)} records."
     )
 
     print("\nLoading embeddings...")
@@ -318,6 +360,14 @@ def main():
         f"Loaded {len(embedding_ids)} embeddings."
     )
 
+    print("\nLoading evaluation questions...")
+
+    eval_questions = load_eval_questions()
+
+    print(
+        f"Loaded {len(eval_questions)} evaluation questions."
+    )
+
     if len(records) != len(embedding_ids):
 
         raise RuntimeError(
@@ -326,13 +376,11 @@ def main():
         )
 
     # --------------------------------------------------------
-    # API keys
+    # Create clients
     # --------------------------------------------------------
 
     api_keys = load_api_keys()
 
-    # For now use the first working key.
-    # If it fails because of quota, try another key.
     clients = []
 
     for item in api_keys:
@@ -343,12 +391,10 @@ def main():
                 item["key"]
             )
 
-            clients.append(
-                {
-                    "number": item["number"],
-                    "client": client,
-                }
-            )
+            clients.append({
+                "number": item["number"],
+                "client": client,
+            })
 
         except Exception:
             pass
@@ -365,53 +411,42 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Interactive loop
+    # Remove previous results
     # --------------------------------------------------------
 
-    print("\n" + "=" * 60)
-    print("READY")
-    print("=" * 60)
+    if OUTPUT_FILE.exists():
 
-    print(
-        "\nAsk your Second Brain anything."
-    )
+        OUTPUT_FILE.unlink()
 
-    print(
-        "Type 'exit' to quit.\n"
-    )
+    # --------------------------------------------------------
+    # Evaluation
+    # --------------------------------------------------------
 
-    while True:
+    print("\n" + "=" * 70)
+    print("RUNNING EVALUATION")
+    print("=" * 70)
 
-        try:
+    results_for_file = []
 
-            question = input(
-                "You: "
-            ).strip()
+    for number, evaluation in enumerate(
+        eval_questions,
+        start=1,
+    ):
 
-        except (
-            KeyboardInterrupt,
-            EOFError,
-        ):
+        eval_id = evaluation["eval_id"]
+        question = evaluation["question"]
 
-            print("\n\nGoodbye.")
-            break
+        print(
+            f"\n[{number}/{len(eval_questions)}] "
+            f"{eval_id}"
+        )
 
-        if not question:
-            continue
-
-        if question.lower() in {
-            "exit",
-            "quit",
-        }:
-
-            print("\nGoodbye.")
-            break
-
-        # ----------------------------------------------------
-        # Try available Gemini clients
-        # ----------------------------------------------------
+        print(
+            f"Question: {question}"
+        )
 
         answer = None
+        retrieved = None
         last_error = None
 
         for client_info in clients:
@@ -420,8 +455,7 @@ def main():
 
             try:
 
-                # Retrieve
-                results = retrieve(
+                retrieved = retrieve(
                     question,
                     client,
                     records,
@@ -429,12 +463,10 @@ def main():
                     embeddings,
                 )
 
-                # Build context
                 context = build_context(
-                    results
+                    retrieved
                 )
 
-                # Generate answer
                 answer = generate_answer(
                     question,
                     context,
@@ -448,7 +480,7 @@ def main():
                 last_error = error
 
                 print(
-                    f"\nAPI key "
+                    f"API key "
                     f"{client_info['number']} "
                     f"failed. Trying another..."
                 )
@@ -456,31 +488,98 @@ def main():
         if answer is None:
 
             print(
-                "\nERROR:"
+                f"ERROR: {last_error}"
             )
-
-            print(last_error)
 
             continue
 
         # ----------------------------------------------------
-        # Display answer
+        # Display
         # ----------------------------------------------------
 
         print(
-            "\nSecond Brain:"
+            f"Answer: {answer}"
         )
 
-        print(answer)
+        print("Retrieved:")
 
-        print(
-            "\n" + "-" * 60
+        for rank, item in enumerate(
+            retrieved,
+            start=1,
+        ):
+
+            print(
+                f"  {rank}. "
+                f"{item['id']} "
+                f"({item['score']:.4f})"
+            )
+
+        # ----------------------------------------------------
+        # Save
+        # ----------------------------------------------------
+
+        output_record = {
+            "eval_id": eval_id,
+            "question": question,
+            "expected": {
+                "ground_truth_id": evaluation.get(
+                    "ground_truth_id"
+                ),
+                "expected_topic": evaluation.get(
+                    "expected_topic"
+                ),
+                "domain": evaluation.get(
+                    "domain"
+                ),
+                "difficulty": evaluation.get(
+                    "difficulty"
+                ),
+            },
+            "answer": answer,
+            "retrieved": [
+                {
+                    "id": item["id"],
+                    "score": item["score"],
+                }
+                for item in retrieved
+            ],
+        }
+
+        results_for_file.append(
+            output_record
         )
 
-        print(
-            "Ask another question "
-            "(or type 'exit'):\n"
-        )
+        with OUTPUT_FILE.open(
+            "a",
+            encoding="utf-8",
+        ) as file:
+
+            file.write(
+                json.dumps(
+                    output_record,
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    # --------------------------------------------------------
+    # Summary
+    # --------------------------------------------------------
+
+    print("\n" + "=" * 70)
+    print("EVALUATION COMPLETE")
+    print("=" * 70)
+
+    print(
+        f"\nCompleted: "
+        f"{len(results_for_file)} / "
+        f"{len(eval_questions)}"
+    )
+
+    print(
+        f"Results saved to:"
+        f"\n{OUTPUT_FILE}"
+    )
 
 
 if __name__ == "__main__":
